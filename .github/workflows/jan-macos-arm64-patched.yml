@@ -1,0 +1,106 @@
+name: Jan macOS arm64 (patched build)
+
+# Runs on GitHub's Apple Silicon runners (macos-14), so no Mac is needed on
+# your side. Copy this file into your fork's `.github/workflows/`, commit the
+# patched tree (or keep patch/ + tools/ as they are here), then trigger it from
+# the Actions tab. It produces an unsigned .app and .dmg as workflow artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      jan_ref:
+        description: 'Jan ref to build'
+        type: string
+        default: 'v0.8.8'
+      version:
+        description: 'Version string; a hyphen enables the nightly channel (and Cowork)'
+        type: string
+        default: '0.8.8-5712'
+      engine_variant:
+        description: 'llama.cpp backend(s) compiled into jan-llama-worker'
+        type: choice
+        options: [metal, cpu, vulkan-metal]
+        default: metal
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      JAN_REF: ${{ inputs.jan_ref }}
+      JAN_VERSION: ${{ inputs.version }}
+      JAN_ENGINE_VARIANT: ${{ inputs.engine_variant }}
+
+    steps:
+      - name: Checkout this repo (patch + tools)
+        uses: actions/checkout@v4
+
+      - name: Fetch Jan source
+        run: |
+          git clone --branch "$JAN_REF" --depth 1 https://github.com/janhq/jan jan
+          cd jan && git rev-parse HEAD
+
+      - name: Apply the patch
+        working-directory: jan
+        run: |
+          git apply "$GITHUB_WORKSPACE/patch/configurable-cowork-token-budget.patch"
+          git diff --stat | tail -3
+
+      - name: Nightly channel + version
+        working-directory: jan
+        run: |
+          cp "$GITHUB_WORKSPACE/tools/mac-nightly-channel.mjs" tools/mac-nightly-channel.mjs
+          node tools/mac-nightly-channel.mjs --version "$JAN_VERSION"
+
+      - name: Setup Node + yarn
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable yarn 4
+        run: |
+          corepack enable
+          corepack prepare yarn@4.5.3 --activate
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install workspace dependencies
+        working-directory: jan
+        run: yarn install --no-immutable
+
+      - name: Build Tauri plugin APIs, core and extensions
+        working-directory: jan
+        run: |
+          yarn build:tauri:plugin:api
+          yarn build:core
+          yarn build:extensions
+
+      - name: Fetch bun / uv / sqlite-vec
+        working-directory: jan
+        run: yarn download:bin
+
+      - name: Build the engine (jan-llama-worker + ggml dylibs)
+        working-directory: jan
+        run: make build-engine JAN_ENGINE_VARIANT="$JAN_ENGINE_VARIANT"
+
+      - name: Icons and bundled assets
+        working-directory: jan
+        run: |
+          cp .github/scripts/icon-nightly.png src-tauri/icons/icon.png
+          yarn build:icon
+          yarn copy:assets:tauri
+
+      - name: Build the app and the dmg (arm64 only)
+        working-directory: jan
+        run: yarn tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jan-nightly-macos-arm64-patched
+          path: |
+            jan/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            jan/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
