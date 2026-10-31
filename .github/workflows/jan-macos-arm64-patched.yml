@@ -1,9 +1,9 @@
 name: Jan macOS arm64 (patched build)
 
-# Runs on GitHub's Apple Silicon runners (macos-14), so no Mac is needed on
-# your side. Copy this file into your fork's `.github/workflows/`, commit the
-# patched tree (or keep patch/ + tools/ as they are here), then trigger it from
-# the Actions tab. It produces an unsigned .app and .dmg as workflow artifacts.
+# Runs on GitHub's Apple Silicon runners (macos-14/15), so no Mac is needed on
+# your side. Copy this file into your fork's `.github/workflows/`, keep patch/
+# and tools/ alongside it, then trigger it from the Actions tab. It produces an
+# unsigned .app and .dmg as workflow artifacts.
 
 on:
   workflow_dispatch:
@@ -16,20 +16,33 @@ on:
         description: 'Version string; a hyphen enables the nightly channel (and Cowork)'
         type: string
         default: '0.8.8-5712'
+      runner:
+        description: 'macOS runner (Apple Silicon)'
+        type: choice
+        options: [macos-14, macos-15, macos-26]
+        default: macos-14
       engine_variant:
         description: 'llama.cpp backend(s) compiled into jan-llama-worker'
         type: choice
-        options: [metal, cpu, vulkan-metal]
+        options: [metal, cpu, metal-vulkan]
         default: metal
+      xcode:
+        description: 'Optional Xcode version to select, e.g. 16.4. Empty = image default'
+        type: string
+        default: ''
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 90
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
     env:
       JAN_REF: ${{ inputs.jan_ref }}
       JAN_VERSION: ${{ inputs.version }}
       JAN_ENGINE_VARIANT: ${{ inputs.engine_variant }}
+      # Jan's build-utils sign the engine when JAN_ENGINE_REQUIRE_SIGNING=1 and
+      # fail without a Developer ID. Unsigned build, so leave it unset: the
+      # scripts print a warning and skip.
+      NODE_OPTIONS: '--max-old-space-size=4196'
 
     steps:
       - name: Checkout this repo (patch + tools)
@@ -38,34 +51,57 @@ jobs:
       - name: Fetch Jan source
         run: |
           git clone --branch "$JAN_REF" --depth 1 https://github.com/janhq/jan jan
-          cd jan && git rev-parse HEAD
+          cd jan && git rev-parse HEAD && git status --short | head -5
 
       - name: Apply the patch
         working-directory: jan
         run: |
-          git apply "$GITHUB_WORKSPACE/patch/configurable-cowork-token-budget.patch"
+          patch="$GITHUB_WORKSPACE/patch/configurable-cowork-token-budget.patch"
+          git apply --check "$patch"
+          git apply "$patch"
           git diff --stat | tail -3
+          # The patch creates two files; assert they landed, because a silently
+          # missing chip is a feature that looks like it was never added.
+          test -f web-app/src/containers/CoworkContextChip.tsx
+          test -f web-app/src/containers/__tests__/CoworkContextChip.test.tsx
 
       - name: Nightly channel + version
         working-directory: jan
+        # Run the script by absolute path: the Jan checkout has no tools/
+        # directory, and `cp` into it used to fail the whole job.
         run: |
-          cp "$GITHUB_WORKSPACE/tools/mac-nightly-channel.mjs" tools/mac-nightly-channel.mjs
-          node tools/mac-nightly-channel.mjs --version "$JAN_VERSION"
+          node "$GITHUB_WORKSPACE/tools/mac-nightly-channel.mjs" --version "$JAN_VERSION"
+          # Cowork is gated on the version string containing a hyphen, so check
+          # it here rather than discovering an app without Cowork after 40 min.
+          node -e "const v=require('./web-app/package.json').version; if(!v.includes('-')) { console.error('version '+v+' is not a nightly build; Cowork would be hidden'); process.exit(1) } console.log('web-app version', v)"
 
-      - name: Setup Node + yarn
+      - name: Select Xcode (optional)
+        if: ${{ inputs.xcode != '' }}
+        run: sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer"
+
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
 
       - name: Enable yarn 4
         run: |
           corepack enable
           corepack prepare yarn@4.5.3 --activate
+          yarn --version
+          yarn config set -H enableImmutableInstalls false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+
+      # The engine build needs cmake. It is on the GitHub macOS images, but
+      # guard anyway so a runner-label change cannot break the job outright.
+      - name: Ensure cmake
+        run: |
+          command -v cmake || brew install cmake
+          cmake --version | head -1
 
       - name: Install workspace dependencies
         working-directory: jan
@@ -82,9 +118,13 @@ jobs:
         working-directory: jan
         run: yarn download:bin
 
-      - name: Build the engine (jan-llama-worker + ggml dylibs)
+      - name: Build the engine (jan-llama-worker + ggml Metal dylibs)
         working-directory: jan
-        run: make build-engine JAN_ENGINE_VARIANT="$JAN_ENGINE_VARIANT"
+        # Vendored llama.cpp is cloned by fetch-engine-source.sh (make target
+        # `engine-source` runs inside build-engine). Metal needs Xcode only.
+        run: |
+          make build-engine JAN_ENGINE_VARIANT="$JAN_ENGINE_VARIANT"
+          ls -lh src-tauri/resources/bin
 
       - name: Icons and bundled assets
         working-directory: jan
@@ -95,6 +135,9 @@ jobs:
 
       - name: Build the app and the dmg (arm64 only)
         working-directory: jan
+        # `yarn build` would also build mlx-server (needs xcodebuild) and target
+        # universal-apple-darwin; the channel script already removed the MLX
+        # resources, so bundle the app directly for one arch.
         run: yarn tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Upload artifacts
@@ -104,3 +147,15 @@ jobs:
           path: |
             jan/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             jan/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+
+      # Only on failure: the engine build writes cmake output to this log, and
+      # cargo swallows a build script's stdout unless the build fails.
+      - name: Upload build diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            jan/src-tauri/target/engine-build.log
+            jan/src-tauri/resources/bin
+          if-no-files-found: ignore
