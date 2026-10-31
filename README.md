@@ -9,6 +9,7 @@
 | `patch/configurable-cowork-token-budget.patch` | 产品代码补丁（token 预算 / 步数上限可配 + composer 上下文长度下拉 + 计费修复 + 测试，16 个文件） |
 | `tools/mac-nightly-channel.mjs` | 夜间渠道与版本配置（带 `-` 的版本号才会启用 Cowork；productName/identifier/mainBinaryName/Info.plist；关闭自动更新与更新产物；默认移除 MLX 资源） |
 | `tools/mac-engine-toolchain.sh` | 挑一个能编译 ggml `apple_m4` 变体的 Xcode，必要时改 vendored cmake（见下） |
+| `tools/adhoc-sign-mac-bundle.sh` | 给未签名的 `.app` 做 ad-hoc 签名并重写 `.dmg`，避免 macOS 报「已损坏」（见下） |
 | `tools/build-mac-nightly.sh` | 有 Mac 时的一键本地构建（同一套补丁与渠道配置） |
 
 ## 推上去并触发
@@ -50,11 +51,24 @@ git push origin main
 ```
 
 ## 装到 Mac 上
-包是**未签名**的（没有开发者证书）。首次打开：
+包是**未签名**的（没有开发者证书、也没公证）。打开 dmg，把 `Jan-nightly.app` 拖进「应用程序」；首次打开要告诉 Gatekeeper 别拦：
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Jan-nightly.app"
+xattr -cr "/Applications/Jan-nightly.app"        # 清掉隔离属性
 ```
 或者右键 → 打开 → 再点「打开」。
+
+### 如果报「已损坏，无法打开」
+这不是下载坏了，而是 Tauri 在没有 Developer ID 时**根本不给 bundle 签名**：`Contents/_CodeSignature` 不存在，但里面的 `libggml*.dylib` / `libggml-*.so` / `bun` / `uv` 带着链接器自带的 ad-hoc 签名（`flags=0x20002(adhoc,linker-signed)`）。这种「内层有签名、外层没封条」的半签名 bundle，`codesign --verify --deep --strict` 会报 `code has no resources but signature indicates they must be present`，macOS 15/26 对带隔离属性的它就显示成「已损坏」。
+
+CI 里的 `tools/adhoc-sign-mac-bundle.sh` 已经处理：先给所有内层 Mach-O 做 ad-hoc 签名、再给 `.app` 本身签名，然后用签名后的 app 重写 dmg（tauri 是先出 dmg 的，事后签名不会被带进去）。已经下载的旧包本机修一次即可：
+```bash
+APP=/Applications/Jan-nightly.app          # 或 下载/.../macos/Jan-nightly.app
+find "$APP" -type f -print0 | xargs -0 file -b | grep -c Mach-O   # 先看有多少 Mach-O
+find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+  file "$f" | grep -q 'Mach-O' && codesign --force --sign - "$f"
+done
+codesign --force --sign - "$APP" && codesign --verify --deep --strict "$APP" && xattr -cr "$APP"
+```
 
 ## 失败了怎么看
 1. 打开那次运行 → `build` job → 找红色的步骤（步骤名已经能定位阶段：`Apply the patch` / `Nightly channel + version` / `Build the engine` / `Build the app and the dmg`）。
@@ -62,6 +76,7 @@ xattr -dr com.apple.quarantine "/Applications/Jan-nightly.app"
 3. 失败时 workflow 会额外上传 `build-diagnostics` 产物，里面有 `src-tauri/target/engine-build.log`（cmake 的完整输出，cargo 只在失败时才打印 build script 输出，所以引擎失败主要看这个日志）。
 
 ## 这一版修掉的问题
+- **装上去报「已损坏，无法打开」**：Tauri 在没有 Developer ID 时不签 bundle（`Contents/_CodeSignature` 缺失），而内层 Mach-O 有链接器的 ad-hoc 签名 —— 半签名 bundle 在 macOS 15/26 + 隔离属性下就表现为「damaged」。新增 `tools/adhoc-sign-mac-bundle.sh`，在 `tauri build` 之后把所有内层 Mach-O 和 bundle 本身 ad-hoc 签好，再用签好的 app 重写 dmg。本机用你下载的产物实测：`codesign --verify --deep --strict` 从失败变成 `valid on disk` / `satisfies its Designated Requirement`，重写后的 dmg 可挂载、内含 `Applications` 快捷方式与 12 个引擎文件，装到 `/Applications` 后能正常启动并拉起 `jan-llama-worker`。仍然是 ad-hoc 签名，所以首次打开还是要 `xattr -cr` 或右键打开 —— 只是不再被当成损坏文件。
 - **`Engine toolchain` 步骤自己挂了**（第三次运行）：
   ```
   engine toolchain: current toolchain cannot compile 'svexpa_f32' with -march=armv9.2-a+dotprod+i8mm+nosve+sme

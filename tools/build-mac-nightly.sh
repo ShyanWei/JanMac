@@ -72,6 +72,10 @@ yarn copy:assets:tauri
 
 yarn tauri build --target aarch64-apple-darwin --bundles app,dmg
 
+# Seal the bundle ad-hoc (otherwise macOS calls the unsigned .app "damaged")
+# and rewrite the dmg around the signed app.
+bash "$SCRIPT_DIR/adhoc-sign-mac-bundle.sh"
+
 echo
 echo "Artifacts:"
 ls -lh src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ 2>/dev/null || true

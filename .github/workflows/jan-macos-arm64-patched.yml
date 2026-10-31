@@ -159,6 +159,16 @@ jobs:
         # resources, so bundle the app directly for one arch.
         run: yarn tauri build --target aarch64-apple-darwin --bundles app,dmg
 
+      # Without a Developer ID Tauri leaves the .app unsigned: no
+      # Contents/_CodeSignature, while the nested dylibs keep the linker's
+      # ad-hoc signature. macOS 15/26 shows that half-signed bundle as
+      # "Jan-nightly.app is damaged and can't be opened", so seal it ad-hoc and
+      # rewrite the dmg around the signed app (tauri wrote the dmg before
+      # anything was signed, and signing afterwards would not survive a copy).
+      - name: Ad-hoc sign the bundle
+        working-directory: jan
+        run: bash "$GITHUB_WORKSPACE/tools/adhoc-sign-mac-bundle.sh"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
