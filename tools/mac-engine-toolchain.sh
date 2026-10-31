@@ -37,6 +37,7 @@ show() {
   echo "  $(xcodebuild -version 2>/dev/null | head -1)"
   echo "  $(clang --version 2>/dev/null | head -1)"
 }
+ORIGINAL_DEV=$(xcode-select -p 2>/dev/null || echo "")
 
 if [ -n "$WANT" ]; then
   dev="/Applications/Xcode_${WANT}.app/Contents/Developer"
@@ -74,7 +75,13 @@ else
     show
     exit 0
   fi
+  # Nothing worked: go back to whatever the image had selected rather than
+  # leaving the last (oldest) Xcode we probed.
+  if [ -n "$ORIGINAL_DEV" ]; then
+    sudo xcode-select -s "$ORIGINAL_DEV" >/dev/null 2>&1 || true
+  fi
   echo "engine toolchain: no installed Xcode compiles it; patching the vendored cmake"
+  show
 fi
 
 [ -f "$CMAKE_FILE" ] || {
