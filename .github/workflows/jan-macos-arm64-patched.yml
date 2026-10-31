@@ -156,6 +156,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jan-nightly-macos-arm64-patched
+          # A green run with no .dmg would look like success and leave nothing
+          # to download, so treat a missing bundle as an error.
+          if-no-files-found: error
           path: |
             jan/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             jan/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
