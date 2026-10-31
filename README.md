@@ -8,6 +8,8 @@
 | `.github/workflows/jan-macos-arm64-patched.yml` | 在 macOS Apple Silicon runner（`macos-14`/`15`/`26`）上构建 arm64 包 |
 | `patch/configurable-cowork-token-budget.patch` | 产品代码补丁（token 预算 / 步数上限可配 + composer 上下文长度下拉 + 计费修复 + 测试，16 个文件） |
 | `tools/mac-nightly-channel.mjs` | 夜间渠道与版本配置（带 `-` 的版本号才会启用 Cowork；productName/identifier/mainBinaryName/Info.plist；关闭自动更新与更新产物；默认移除 MLX 资源） |
+| `tools/mac-engine-toolchain.sh` | 挑一个能编译 ggml `apple_m4` 变体的 Xcode，必要时给 vendored cmake 补 `+sve`（见下） |
+| `tools/build-mac-nightly.sh` | 有 Mac 时的一键本地构建（同一套补丁与渠道配置） |
 
 ## 推上去并触发
 ```bash
@@ -19,15 +21,33 @@ git commit -m "Jan v0.8.8 patched build (macOS arm64)"
 git remote add origin https://github.com/<你的用户名>/<仓库名>.git
 git push -u origin main
 ```
-GitHub 上：**Actions → “Jan macOS arm64 (patched build)” → Run workflow**，默认参数即可：
+然后 GitHub 上：**Actions → “Jan macOS arm64 (patched build)” → Run workflow**，默认参数即可：
 - `jan_ref` = `v0.8.8`
 - `version` = `0.8.8-5712`（**必须带 `-`**，否则 Cowork 不显示；workflow 里有专门的快速校验）
 - `runner` = `macos-14`（Apple Silicon；arm64 runner 排队可能较慢，可以选 `macos-15`）
 - `engine_variant` = `metal`（M 芯片本地推理；纯 CPU 选 `cpu`）
-- `xcode` = 留空用镜像默认；Metal 编译失败时可填具体版本（如 `16.4`）
+- `xcode` = 留空 = 自动挑一个能编译引擎的 Xcode（必要时给 vendored cmake 补 `+sve`）；也可填具体版本，如 `16.4`
 
 跑完在那次运行的 **Artifacts** 里下载 `jan-nightly-macos-arm64-patched`，内含
 `Jan-nightly_0.8.8-5712_aarch64.dmg` 与 `Jan-Desktop-nightly.app`。
+
+## 推不动时（DNS 把 github.com 解析成空）
+`git push` 报 `Failed to connect to github.com port 443`，但浏览器能打开 GitHub（浏览器走了加密 DNS）。确认：
+```powershell
+Resolve-DnsName github.com -Type A    # 空 = 解析被过滤
+Test-NetConnection github.com -Port 443   # False
+```
+`api.github.com` 是通的，说明只有 `github.com` 的解析被拦。两种办法：
+1. 等解析恢复后重试 `git push origin main`。
+2. 用**管理员** PowerShell 加一条 hosts（GitHub IP 直连是通的，证书对 `github.com` 有效）：
+```powershell
+Add-Content -Path "$env:WINDIR\System32\drivers\etc\hosts" -Value "140.82.114.4 github.com"
+ipconfig /flushdns
+cd D:\AgentProjects\JanFix\mac-ci
+git push origin main
+# 推完删掉这行，否则以后 IP 轮换反而连不上
+(Get-Content "$env:WINDIR\System32\drivers\etc\hosts") -notmatch 'github\.com' | Set-Content "$env:WINDIR\System32\drivers\etc\hosts"
+```
 
 ## 装到 Mac 上
 包是**未签名**的（没有开发者证书）。首次打开：
