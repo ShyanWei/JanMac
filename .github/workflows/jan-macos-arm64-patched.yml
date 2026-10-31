@@ -1,9 +1,13 @@
 name: Jan macOS arm64 (patched build)
 
-# Runs on GitHub's Apple Silicon runners (macos-14/15), so no Mac is needed on
+# Runs on GitHub's Apple Silicon runners (macos-15/26), so no Mac is needed on
 # your side. Copy this file into your fork's `.github/workflows/`, keep patch/
 # and tools/ alongside it, then trigger it from the Actions tab. It produces an
 # unsigned .app and .dmg as workflow artifacts.
+#
+# macos-14 is deliberately not offered: GitHub deprecates the macOS 14 images
+# (unsupported after 2026-11-02) and its default Xcode 15.4 is the toolchain
+# that cannot compile ggml's apple_m4 CPU variant.
 
 on:
   workflow_dispatch:
@@ -19,15 +23,15 @@ on:
       runner:
         description: 'macOS runner (Apple Silicon)'
         type: choice
-        options: [macos-14, macos-15, macos-26]
-        default: macos-14
+        options: [macos-15, macos-26]
+        default: macos-15
       engine_variant:
         description: 'llama.cpp backend(s) compiled into jan-llama-worker'
         type: choice
         options: [metal, cpu, metal-vulkan]
         default: metal
       xcode:
-        description: 'Optional Xcode version (e.g. 16.4). Empty = pick one that compiles the engine'
+        description: 'Optional Xcode version (e.g. 16.4 or 26.3). Empty = pick one that compiles the engine'
         type: string
         default: ''
 
@@ -119,13 +123,16 @@ jobs:
         working-directory: jan
         run: make engine-source
 
-      # ggml's apple_m4 CPU variant is compiled with `+nosve+sme`, and
-      # ggml-cpu/vec.h calls svexpa_f32 -- an SVE intrinsic -- on that path.
-      # AppleClang 15 (Xcode 15.4, the macos-14 default) rejects it, which is
-      # what killed the previous run at 95%. The script picks an Xcode that
-      # compiles it, and only as a last resort drops `+nosve` from the vendored
-      # cmake (armv9.2-a carries SVE anyway, and the module is chosen at runtime
-      # only on SME-capable chips, i.e. M4+, which have SVE).
+      # ggml's apple_m4 CPU variant is compiled with `-march=armv9.2-a+dotprod+i8mm+nosve+sme`,
+      # and ggml-cpu/vec.h calls svexpa_f32 -- an SVE intrinsic -- on its
+      # `#if __ARM_FEATURE_SVE` path. AppleClang 15 (Xcode 15.4, the old
+      # macos-14 default) defines that macro from `+sme` while `+nosve` still
+      # removes the target feature, which is what killed the previous run at 95%.
+      # The script probes exactly that construct, then escalates: an installed
+      # Xcode that compiles the flags as written -> `+nosve` becomes `+sve` in
+      # the vendored cmake (armv9.2-a carries SVE anyway, and the module is only
+      # selected at runtime on SME chips, i.e. M4+, which have SVE) -> if even
+      # that fails, the apple_m4 variant is dropped so the build still finishes.
       - name: Engine toolchain
         working-directory: jan
         run: bash "$GITHUB_WORKSPACE/tools/mac-engine-toolchain.sh" "${{ inputs.xcode }}"
