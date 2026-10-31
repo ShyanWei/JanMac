@@ -27,7 +27,7 @@ on:
         options: [metal, cpu, metal-vulkan]
         default: metal
       xcode:
-        description: 'Optional Xcode version to select, e.g. 16.4. Empty = image default'
+        description: 'Optional Xcode version (e.g. 16.4). Empty = pick one that compiles the engine'
         type: string
         default: ''
 
@@ -75,10 +75,6 @@ jobs:
           # it here rather than discovering an app without Cowork after 40 min.
           node -e "const v=require('./web-app/package.json').version; if(!v.includes('-')) { console.error('version '+v+' is not a nightly build; Cowork would be hidden'); process.exit(1) } console.log('web-app version', v)"
 
-      - name: Select Xcode (optional)
-        if: ${{ inputs.xcode != '' }}
-        run: sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer"
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -117,6 +113,22 @@ jobs:
       - name: Fetch bun / uv / sqlite-vec
         working-directory: jan
         run: yarn download:bin
+
+      # The vendored llama.cpp, so the toolchain check below can patch it.
+      - name: Fetch the engine source
+        working-directory: jan
+        run: make engine-source
+
+      # ggml's apple_m4 CPU variant is compiled with `+nosve+sme`, and
+      # ggml-cpu/vec.h calls svexpa_f32 -- an SVE intrinsic -- on that path.
+      # AppleClang 15 (Xcode 15.4, the macos-14 default) rejects it, which is
+      # what killed the previous run at 95%. The script picks an Xcode that
+      # compiles it, and only as a last resort drops `+nosve` from the vendored
+      # cmake (armv9.2-a carries SVE anyway, and the module is chosen at runtime
+      # only on SME-capable chips, i.e. M4+, which have SVE).
+      - name: Engine toolchain
+        working-directory: jan
+        run: bash "$GITHUB_WORKSPACE/tools/mac-engine-toolchain.sh" "${{ inputs.xcode }}"
 
       - name: Build the engine (jan-llama-worker + ggml Metal dylibs)
         working-directory: jan

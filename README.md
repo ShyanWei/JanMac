@@ -42,6 +42,11 @@ xattr -dr com.apple.quarantine "/Applications/Jan-nightly.app"
 3. 失败时 workflow 会额外上传 `build-diagnostics` 产物，里面有 `src-tauri/target/engine-build.log`（cmake 的完整输出，cargo 只在失败时才打印 build script 输出，所以引擎失败主要看这个日志）。
 
 ## 这一版修掉的问题
+- **引擎编译失败**（第二次运行，挂在 `Build the engine`，95% 处）：
+  ```
+  ggml/src/ggml-cpu/vec.h:1100:26: error: 'svexpa_f32' needs target feature sve
+  ```
+  ggml 的 `apple_m4` CPU 变体用 `-march=armv9.2-a+dotprod+i8mm+nosve+sme` 编译，而 `vec.h` 的 SME 路径里调用了 SVE intrinsic `svexpa_f32`。macos-14 默认的 AppleClang 15（Xcode 15.4）不把 `+sme` 视为隐含 `+sve`，所以报错；较新的 AppleClang 会（Jan 官方发布 CI 固定用 Xcode 26.x，就是这个原因）。新增的 `tools/mac-engine-toolchain.sh`：先探测当前工具链能否编译这组 flags，不能就依次尝试镜像里已安装的最新 Xcode，都不行才把**vendored** ggml cmake 里的 `+nosve` 去掉（`armv9.2-a` 本身带 SVE，而该模块只在运行时检测到 SME 的机器上才被选用，即 M4+，这类机器必然有 SVE；dispatch 逻辑与其他变体不动）。可选参数 `xcode` 可直接指定版本。
 - **v1 的硬失败**：`cp tools/mac-nightly-channel.mjs tools/...` —— Jan 仓库根目录**没有 `tools/`**，`cp` 直接报错，job 在几分钟内就挂了。现在按绝对路径运行脚本，不再往 jan 里复制。
 - `Info.plist` 之前没改（官方 nightly 会改）：bundle id 与 URL scheme 仍是 `jan.ai.app`。渠道脚本现在把它改成 `jan-nightly.ai.app` / `jan-nightly`。
 - 显式 `bundle.createUpdaterArtifacts = false` + `plugins.updater.active = false`：未签名构建如果要求产出更新产物，打包会因为缺 `TAURI_SIGNING_PRIVATE_KEY` 中止。

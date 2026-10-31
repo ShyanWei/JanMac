@@ -59,7 +59,10 @@ yarn build:extensions
 # bun + uv + sqlite-vec for darwin/arm64.
 yarn download:bin
 
-# The engine worker and the ggml dylibs the dmg bundles.
+# The engine worker and the ggml dylibs the dmg bundles. The vendored llama.cpp
+# is fetched first so the toolchain script can probe and, if needed, patch it.
+make engine-source
+bash "$SCRIPT_DIR/mac-engine-toolchain.sh" "${XCODE:-}"
 make build-engine JAN_ENGINE_VARIANT="$JAN_ENGINE_VARIANT"
 
 # The nightly icon, same file Jan's own CI copies before `tauri icon`.
